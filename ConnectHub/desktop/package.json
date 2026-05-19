@@ -2,6 +2,7 @@
   "name": "connecthub-desktop",
   "version": "1.0.0",
   "description": "ConnectHub Desktop Application",
+  "author": "ConnectHub",
   "main": "main.js",
   "scripts": {
     "start": "electron .",

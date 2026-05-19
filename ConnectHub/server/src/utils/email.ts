@@ -1,17 +1,25 @@
 import nodemailer from 'nodemailer';
 import { config } from '../config';
 
-const transporter = nodemailer.createTransport({
-  host: config.smtp.host,
-  port: config.smtp.port,
-  secure: config.smtp.port === 465,
-  auth: {
-    user: config.smtp.user,
-    pass: config.smtp.pass,
-  },
-});
+const isSmtpConfigured = !!(config.smtp.user && config.smtp.pass);
+
+let transporter: nodemailer.Transporter | null = null;
+
+if (isSmtpConfigured) {
+  transporter = nodemailer.createTransport({
+    host: config.smtp.host,
+    port: config.smtp.port,
+    secure: config.smtp.port === 465,
+    auth: {
+      user: config.smtp.user,
+      pass: config.smtp.pass,
+    },
+    connectionTimeout: 5000,
+  });
+}
 
 export async function sendVerificationEmail(to: string, token: string): Promise<void> {
+  if (!transporter) return;
   const verificationUrl = `${config.clientUrl}/verify-email?token=${token}`;
 
   await transporter.sendMail({
@@ -30,6 +38,7 @@ export async function sendVerificationEmail(to: string, token: string): Promise<
 }
 
 export async function sendPasswordResetEmail(to: string, token: string): Promise<void> {
+  if (!transporter) return;
   const resetUrl = `${config.clientUrl}/reset-password?token=${token}`;
 
   await transporter.sendMail({

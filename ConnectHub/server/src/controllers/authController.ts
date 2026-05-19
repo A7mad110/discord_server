@@ -40,10 +40,18 @@ export const register = async (req: Request, res: Response) => {
       emailVerificationExpires: new Date(Date.now() + 24 * 60 * 60 * 1000),
     });
 
+    if (!config.smtp.user && !config.smtp.pass) {
+      user.isEmailVerified = true;
+      user.emailVerificationToken = undefined;
+      user.emailVerificationExpires = undefined;
+    }
+
     await user.save();
 
     try {
-      await sendVerificationEmail(user.email, verificationToken);
+      if (config.smtp.user) {
+        await sendVerificationEmail(user.email, verificationToken);
+      }
     } catch {
       // Email sending failed, continue anyway
     }

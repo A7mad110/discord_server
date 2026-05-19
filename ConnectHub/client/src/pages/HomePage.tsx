@@ -62,8 +62,13 @@ export function HomePage() {
               <ChannelList />
               {activeChannel ? (
                 <div className="flex-1 flex flex-col min-w-0">
-                  <ChatArea />
-                  {activeChannel.type === 'voice' && <VoicePanel />}
+                  {activeChannel.type === 'voice' ? (
+                    <div className="flex-1 flex items-center justify-center bg-discord-800">
+                      <VoicePanel />
+                    </div>
+                  ) : (
+                    <ChatArea />
+                  )}
                 </div>
               ) : (
                 <div className="flex-1 flex items-center justify-center bg-discord-800">
