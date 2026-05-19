@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:7
+    container_name: connecthub-mongodb
+    restart: unless-stopped
+    ports:
+      - '27017:27017'
+    volumes:
+      - mongodb_data:/data/db
+    environment:
+      MONGO_INITDB_DATABASE: connecthub
+
+  server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: connecthub-server
+    restart: unless-stopped
+    ports:
+      - '5000:5000'
+    depends_on:
+      - mongodb
+    environment:
+      NODE_ENV: production
+      PORT: 5000
+      MONGODB_URI: mongodb://mongodb:27017/connecthub
+      JWT_SECRET: ${JWT_SECRET:-change-this-secret-in-production}
+      CLIENT_URL: http://localhost:5173
+    volumes:
+      - uploads:/app/uploads
+
+  client:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+    container_name: connecthub-client
+    restart: unless-stopped
+    ports:
+      - '5173:5173'
+    depends_on:
+      - server
+    environment:
+      VITE_API_URL: http://localhost:5000
+
+volumes:
+  mongodb_data:
+  uploads:
