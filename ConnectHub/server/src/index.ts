@@ -17,7 +17,10 @@ const httpServer = http.createServer(app);
 
 // Security
 app.use(helmet({ contentSecurityPolicy: false }));
-app.use(cors({ origin: config.clientUrl, credentials: true }));
+app.use(cors({
+  origin: [config.clientUrl, 'https://discord-server-rho.vercel.app', 'http://localhost:5173'].filter(Boolean),
+  credentials: true,
+}));
 
 // Rate limiting
 const limiter = rateLimit({
