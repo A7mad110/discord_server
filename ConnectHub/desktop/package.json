@@ -21,7 +21,7 @@
       "preload.js"
     ],
     "win": {
-      "target": ["nsis"],
+      "target": ["portable"],
       "icon": "icon.ico"
     },
     "mac": {

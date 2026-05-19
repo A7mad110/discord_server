@@ -69,11 +69,14 @@ function createWindow() {
   const menu = Menu.buildFromTemplate(menuTemplate);
   Menu.setApplicationMenu(menu);
 
+  const appUrl = isDev
+    ? 'http://localhost:5173'
+    : 'https://discord-server-rho.vercel.app';
+
+  mainWindow.loadURL(appUrl);
+
   if (isDev) {
-    mainWindow.loadURL('http://localhost:5173');
     mainWindow.webContents.openDevTools();
-  } else {
-    mainWindow.loadURL('http://localhost:5000');
   }
 
   mainWindow.once('ready-to-show', () => {
