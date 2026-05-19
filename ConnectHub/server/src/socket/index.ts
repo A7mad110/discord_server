@@ -1,14 +1,16 @@
-import { Server as SocketServer } from 'socket.io';
+import { Server as SocketServer, Socket } from 'socket.io';
 import jwt from 'jsonwebtoken';
 import { Server as HttpServer } from 'http';
 import { config } from '../config';
 import { User } from '../models/User';
 import { Message } from '../models/Message';
 
-interface AuthenticatedSocket {
-  userId?: string;
-  username?: string;
+interface VoiceUser {
+  userId: string;
+  username: string;
 }
+
+const voiceRooms = new Map<string, VoiceUser[]>();
 
 export function setupSocket(httpServer: HttpServer) {
   const io = new SocketServer(httpServer, {
@@ -17,20 +19,18 @@ export function setupSocket(httpServer: HttpServer) {
       methods: ['GET', 'POST'],
       credentials: true,
     },
+    pingTimeout: 60000,
+    pingInterval: 25000,
   });
 
   io.use(async (socket, next) => {
     try {
       const token = socket.handshake.auth.token || socket.handshake.query.token;
-      if (!token) {
-        return next(new Error('Authentication required'));
-      }
+      if (!token) return next(new Error('Authentication required'));
 
       const decoded = jwt.verify(token as string, config.jwtSecret) as { userId: string };
       const user = await User.findById(decoded.userId);
-      if (!user) {
-        return next(new Error('User not found'));
-      }
+      if (!user) return next(new Error('User not found'));
 
       (socket as any).userId = user._id.toString();
       (socket as any).username = user.username;
@@ -44,15 +44,9 @@ export function setupSocket(httpServer: HttpServer) {
     const userId = (socket as any).userId;
     const username = (socket as any).username;
 
-    console.log(`User connected: ${username} (${userId})`);
-
-    // Join user's personal room for DMs and notifications
     socket.join(`user:${userId}`);
-
-    // Update user status to online
     await User.findByIdAndUpdate(userId, { status: 'online' });
 
-    // Join all server rooms
     const user = await User.findById(userId).populate('servers');
     if (user) {
       user.servers.forEach((server: any) => {
@@ -60,20 +54,16 @@ export function setupSocket(httpServer: HttpServer) {
       });
     }
 
-    // Emit presence update
     io.emit('presence:update', { userId, status: 'online' });
 
-    // Join a channel
     socket.on('channel:join', (channelId: string) => {
       socket.join(`channel:${channelId}`);
     });
 
-    // Leave a channel
     socket.on('channel:leave', (channelId: string) => {
       socket.leave(`channel:${channelId}`);
     });
 
-    // Send message
     socket.on('message:send', async (data: { channelId: string; content: string; replyTo?: string }) => {
       try {
         const message = new Message({
@@ -82,7 +72,6 @@ export function setupSocket(httpServer: HttpServer) {
           channel: data.channelId,
           replyTo: data.replyTo || undefined,
         });
-
         await message.save();
 
         const populatedMessage = await Message.findById(message._id)
@@ -90,12 +79,11 @@ export function setupSocket(httpServer: HttpServer) {
           .populate('replyTo');
 
         io.to(`channel:${data.channelId}`).emit('message:new', populatedMessage);
-      } catch (error) {
+      } catch {
         socket.emit('error', { message: 'Failed to send message' });
       }
     });
 
-    // Edit message
     socket.on('message:edit', async (data: { messageId: string; content: string }) => {
       try {
         const message = await Message.findById(data.messageId);
@@ -111,12 +99,11 @@ export function setupSocket(httpServer: HttpServer) {
           isEdited: true,
           updatedAt: message.updatedAt,
         });
-      } catch (error) {
+      } catch {
         socket.emit('error', { message: 'Failed to edit message' });
       }
     });
 
-    // Delete message
     socket.on('message:delete', async (messageId: string) => {
       try {
         const message = await Message.findById(messageId);
@@ -130,46 +117,58 @@ export function setupSocket(httpServer: HttpServer) {
           _id: message._id,
           channel: message.channel,
         });
-      } catch (error) {
+      } catch {
         socket.emit('error', { message: 'Failed to delete message' });
       }
     });
 
-    // Typing indicator
     socket.on('typing:start', (data: { channelId: string }) => {
       socket.to(`channel:${data.channelId}`).emit('typing:update', {
-        userId,
-        username,
-        channelId: data.channelId,
-        isTyping: true,
+        userId, username, channelId: data.channelId, isTyping: true,
       });
     });
 
     socket.on('typing:stop', (data: { channelId: string }) => {
       socket.to(`channel:${data.channelId}`).emit('typing:update', {
-        userId,
-        username,
-        channelId: data.channelId,
-        isTyping: false,
+        userId, username, channelId: data.channelId, isTyping: false,
       });
     });
 
-    // Voice channel events
+    // Voice: join a voice channel
     socket.on('voice:join', (data: { channelId: string }) => {
       socket.join(`voice:${data.channelId}`);
-      socket.to(`voice:${data.channelId}`).emit('voice:user-joined', {
-        userId,
-        username,
-      });
+
+      if (!voiceRooms.has(data.channelId)) {
+        voiceRooms.set(data.channelId, []);
+      }
+
+      const users = voiceRooms.get(data.channelId)!;
+      const existingUsers = users.filter((u) => u.userId !== userId);
+
+      socket.emit('voice:room-users', { users: existingUsers });
+
+      users.push({ userId, username });
+      socket.to(`voice:${data.channelId}`).emit('voice:user-joined', { userId, username });
     });
 
+    // Voice: leave a voice channel
     socket.on('voice:leave', (data: { channelId: string }) => {
       socket.leave(`voice:${data.channelId}`);
-      socket.to(`voice:${data.channelId}`).emit('voice:user-left', {
-        userId,
-      });
+
+      const users = voiceRooms.get(data.channelId);
+      if (users) {
+        const updated = users.filter((u) => u.userId !== userId);
+        if (updated.length === 0) {
+          voiceRooms.delete(data.channelId);
+        } else {
+          voiceRooms.set(data.channelId, updated);
+        }
+      }
+
+      socket.to(`voice:${data.channelId}`).emit('voice:user-left', { userId });
     });
 
+    // Voice: WebRTC signaling
     socket.on('voice:signal', (data: { to: string; signal: any }) => {
       io.to(`user:${data.to}`).emit('voice:signal', {
         from: userId,
@@ -177,21 +176,16 @@ export function setupSocket(httpServer: HttpServer) {
       });
     });
 
-    // Screen share events
+    // Screen share
     socket.on('screen:start', (data: { channelId: string }) => {
-      socket.to(`voice:${data.channelId}`).emit('screen:started', {
-        userId,
-        username,
-      });
+      socket.to(`voice:${data.channelId}`).emit('screen:started', { userId, username });
     });
 
     socket.on('screen:stop', (data: { channelId: string }) => {
-      socket.to(`voice:${data.channelId}`).emit('screen:stopped', {
-        userId,
-      });
+      socket.to(`voice:${data.channelId}`).emit('screen:stopped', { userId });
     });
 
-    // Presence update
+    // Presence
     socket.on('presence:update', async (status: string) => {
       const validStatuses = ['online', 'idle', 'dnd', 'invisible'];
       if (validStatuses.includes(status)) {
@@ -202,9 +196,18 @@ export function setupSocket(httpServer: HttpServer) {
 
     // Disconnect
     socket.on('disconnect', async () => {
-      console.log(`User disconnected: ${username} (${userId})`);
       await User.findByIdAndUpdate(userId, { status: 'invisible' });
       io.emit('presence:update', { userId, status: 'invisible' });
+
+      voiceRooms.forEach((users, channelId) => {
+        const updated = users.filter((u) => u.userId !== userId);
+        if (updated.length === 0) {
+          voiceRooms.delete(channelId);
+        } else {
+          voiceRooms.set(channelId, updated);
+        }
+        io.to(`voice:${channelId}`).emit('voice:user-left', { userId });
+      });
     });
   });
 
