@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Volume2, Mic, MicOff, Monitor, PhoneOff, MonitorOff, Users } from 'lucide-react';
+import { Volume2, VolumeX, Mic, MicOff, Monitor, PhoneOff, MonitorOff } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import { getSocket } from '../../services/socket';
 
@@ -16,6 +16,7 @@ export function VoicePanel() {
   const [isInVoice, setIsInVoice] = useState(false);
   const [voiceUsers, setVoiceUsers] = useState<any[]>([]);
   const [isMuted, setIsMuted] = useState(false);
+  const [isDeafened, setIsDeafened] = useState(false);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [screenStreams, setScreenStreams] = useState<Map<string, MediaStream>>(new Map());
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -29,6 +30,19 @@ export function VoicePanel() {
   useEffect(() => {
     if (currentUser) userIdRef.current = currentUser._id;
   }, [currentUser]);
+
+  const toggleMute = () => {
+    const newMuted = !isMuted;
+    setIsMuted(newMuted);
+    localStreamRef.current?.getAudioTracks().forEach((t) => { t.enabled = !newMuted; });
+  };
+
+  const toggleDeafen = () => {
+    const newDeafened = !isDeafened;
+    setIsDeafened(newDeafened);
+    audiosRef.current.forEach((audio) => { audio.muted = newDeafened; });
+    localStreamRef.current?.getAudioTracks().forEach((t) => { t.enabled = !newDeafened; });
+  };
 
   const getPC = (targetId: string, stream: MediaStream) => {
     let pc = pcsRef.current.get(targetId);
@@ -301,10 +315,15 @@ export function VoicePanel() {
 
       {/* Controls */}
       <div className="flex items-center gap-4">
-        <button onClick={() => setIsMuted(!isMuted)}
+        <button onClick={toggleMute}
           className={`p-4 rounded-xl transition-all ${isMuted ? 'bg-red-500/20 text-red-400 hover:bg-red-500/30' : 'bg-discord-600 text-gray-300 hover:text-white hover:bg-discord-500'}`}
           title={isMuted ? 'Unmute' : 'Mute'}>
           {isMuted ? <MicOff size={24} /> : <Mic size={24} />}
+        </button>
+        <button onClick={toggleDeafen}
+          className={`p-4 rounded-xl transition-all ${isDeafened ? 'bg-red-500/20 text-red-400 hover:bg-red-500/30' : 'bg-discord-600 text-gray-300 hover:text-white hover:bg-discord-500'}`}
+          title={isDeafened ? 'Undeafen' : 'Deafen'}>
+          {isDeafened ? <VolumeX size={24} /> : <Volume2 size={24} />}
         </button>
         <button onClick={handleScreenShare}
           className={`p-4 rounded-xl transition-all ${isScreenSharing ? 'bg-green-500/20 text-green-400 hover:bg-green-500/30' : 'bg-discord-600 text-gray-300 hover:text-white hover:bg-discord-500'}`}
