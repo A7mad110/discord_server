@@ -12,248 +12,242 @@ const RTC_CONFIG = {
 
 export function VoicePanel() {
   const activeChannel = useStore((s) => s.activeChannel);
-  const currentUser = useStore((s) => s.user);
+  const user = useStore((s) => s.user);
   const [isInVoice, setIsInVoice] = useState(false);
-  const [voiceUsers, setVoiceUsers] = useState<any[]>([]);
+  const [users, setUsers] = useState<{ userId: string; username: string }[]>([]);
   const [isMuted, setIsMuted] = useState(false);
   const [isDeafened, setIsDeafened] = useState(false);
-  const [isScreenSharing, setIsScreenSharing] = useState(false);
-  const [screenStreams, setScreenStreams] = useState<Map<string, MediaStream>>(new Map());
-  const localStreamRef = useRef<MediaStream | null>(null);
-  const screenShareRef = useRef<MediaStream | null>(null);
-  const pcsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
-  const pendingRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
-  const audiosRef = useRef<Map<string, HTMLAudioElement>>(new Map());
-  const videosRef = useRef<Map<string, HTMLVideoElement>>(new Map());
-  const userIdRef = useRef<string>('');
+  const [isSharing, setIsSharing] = useState(false);
+  const [screenVideo, setScreenVideo] = useState<{ userId: string } | null>(null);
 
-  useEffect(() => {
-    if (currentUser) userIdRef.current = currentUser._id;
-  }, [currentUser]);
+  const localAudio = useRef<MediaStream | null>(null);
+  const shareStream = useRef<MediaStream | null>(null);
+  const peers = useRef<Map<string, RTCPeerConnection>>(new Map());
+  const pendingIce = useRef<Map<string, RTCIceCandidate[]>>(new Map());
+  const remoteAudios = useRef<Map<string, HTMLAudioElement>>(new Map());
+  const myId = useRef('');
 
-  const toggleMute = () => {
-    const newMuted = !isMuted;
-    setIsMuted(newMuted);
-    localStreamRef.current?.getAudioTracks().forEach((t) => { t.enabled = !newMuted; });
-  };
+  useEffect(() => { if (user) myId.current = user._id; }, [user]);
 
-  const toggleDeafen = () => {
-    const newDeafened = !isDeafened;
-    setIsDeafened(newDeafened);
-    audiosRef.current.forEach((audio) => { audio.muted = newDeafened; });
-    localStreamRef.current?.getAudioTracks().forEach((t) => { t.enabled = !newDeafened; });
-  };
-
-  const getPC = (targetId: string, stream: MediaStream) => {
-    let pc = pcsRef.current.get(targetId);
+  // Create or get peer connection for a target
+  const ensurePC = (targetId: string, stream: MediaStream, isScreen = false) => {
+    const key = isScreen ? `${targetId}:screen` : targetId;
+    let pc = peers.current.get(key);
     if (pc) return pc;
 
     pc = new RTCPeerConnection(RTC_CONFIG);
-    pcsRef.current.set(targetId, pc);
+    peers.current.set(key, pc);
 
-    stream.getTracks().forEach((t) => pc?.addTrack(t, stream));
+    stream.getTracks().forEach((t) => pc!.addTrack(t, stream));
 
     pc.onicecandidate = (e) => {
       if (e.candidate) {
         getSocket()?.emit('voice:signal', {
           to: targetId,
-          signal: { type: 'ice-candidate', candidate: e.candidate.toJSON() },
+          signal: { type: 'ice-candidate', candidate: e.candidate.toJSON(), isScreen },
         });
       }
     };
 
-    pc.ontrack = (e) => {
-      if (e.track.kind === 'audio') {
-        let audio = audiosRef.current.get(targetId);
-        if (!audio) {
-          audio = new Audio();
-          audio.autoplay = true;
-          audiosRef.current.set(targetId, audio);
-        }
-        audio.srcObject = e.streams[0];
-        audio.play().catch(() => {});
-      } else if (e.track.kind === 'video') {
-        setScreenStreams((prev) => {
-          const next = new Map(prev);
-          next.set(targetId, e.streams[0]);
-          return next;
-        });
-      }
-    };
+    if (!isScreen) {
+      pc.ontrack = (e) => {
+        if (e.track.kind !== 'audio') return;
+        let el = remoteAudios.current.get(targetId);
+        if (!el) { el = new Audio(); el.autoplay = true; remoteAudios.current.set(targetId, el); }
+        el.srcObject = e.streams[0];
+        el.play().catch(() => {});
+      };
+    }
 
     return pc;
   };
 
-  const callUser = async (targetId: string) => {
-    const stream = localStreamRef.current;
+  // Offer/Answer/Ice logic
+  const negotiate = async (targetId: string, isScreen = false) => {
+    const stream = isScreen ? shareStream.current : localAudio.current;
     if (!stream) return;
-
-    const pc = getPC(targetId, stream);
+    const pc = ensurePC(targetId, stream, isScreen);
     if (!pc) return;
-
     try {
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       getSocket()?.emit('voice:signal', {
         to: targetId,
-        signal: { type: 'offer', sdp: offer.sdp },
+        signal: { type: 'offer', sdp: offer.sdp, isScreen },
       });
-
-      const pending = pendingRef.current.get(targetId) || [];
-      pending.forEach((c) => pc.addIceCandidate(new RTCIceCandidate(c)).catch(() => {}));
-      pendingRef.current.delete(targetId);
+      const pending = pendingIce.current.get(targetId) || [];
+      pending.forEach((c) => pc.addIceCandidate(c).catch(() => {}));
+      pendingIce.current.delete(targetId);
     } catch {}
   };
 
   const handleSignal = async (data: { from: string; signal: any }) => {
-    const stream = localStreamRef.current;
+    const isScreen = data.signal.isScreen || false;
+    const stream = isScreen ? shareStream.current : localAudio.current;
     if (!stream) return;
+    const key = isScreen ? `${data.from}:screen` : data.from;
+    let pc = peers.current.get(key);
 
     if (data.signal.type === 'offer') {
-      const pc = getPC(data.from, stream);
+      pc = ensurePC(data.from, stream, isScreen);
       if (!pc) return;
-
       try {
         await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: data.signal.sdp }));
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
         getSocket()?.emit('voice:signal', {
           to: data.from,
-          signal: { type: 'answer', sdp: answer.sdp },
+          signal: { type: 'answer', sdp: answer.sdp, isScreen },
         });
-        const pending = pendingRef.current.get(data.from) || [];
-        pending.forEach((c) => pc.addIceCandidate(new RTCIceCandidate(c)).catch(() => {}));
-        pendingRef.current.delete(data.from);
+        const pending = pendingIce.current.get(data.from) || [];
+        pending.forEach((c) => pc!.addIceCandidate(c).catch(() => {}));
+        pendingIce.current.delete(data.from);
       } catch {}
     } else if (data.signal.type === 'answer') {
-      const pc = pcsRef.current.get(data.from);
+      pc = peers.current.get(key);
       if (pc && !pc.currentRemoteDescription) {
         try { await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: data.signal.sdp })); } catch {}
       }
     } else if (data.signal.type === 'ice-candidate') {
-      const pc = pcsRef.current.get(data.from);
+      pc = peers.current.get(key);
       if (pc && pc.remoteDescription) {
         try { await pc.addIceCandidate(new RTCIceCandidate(data.signal.candidate)); } catch {}
       } else {
-        const existing = pendingRef.current.get(data.from) || [];
-        existing.push(data.signal.candidate);
-        pendingRef.current.set(data.from, existing);
+        const list = pendingIce.current.get(data.from) || [];
+        list.push(new RTCIceCandidate(data.signal.candidate));
+        pendingIce.current.set(data.from, list);
       }
     }
   };
 
-  const handleJoin = async () => {
+  // Connect to a user
+  const connectTo = (uid: string) => {
+    if (uid === myId.current) return;
+    if (!localAudio.current) return;
+    setTimeout(() => negotiate(uid, false), 200);
+  };
+
+  // Join voice
+  const join = async () => {
     if (!activeChannel) return;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      localStreamRef.current = stream;
+      const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+      localAudio.current = s;
       getSocket()?.emit('voice:join', { channelId: activeChannel._id });
       setIsInVoice(true);
-    } catch {
-      alert('Please allow microphone access.');
-    }
+    } catch { alert('Please allow microphone access.'); }
   };
 
-  const handleLeave = () => {
-    pcsRef.current.forEach((pc) => pc.close());
-    pcsRef.current.clear();
-    audiosRef.current.forEach((a) => { a.pause(); a.srcObject = null; });
-    audiosRef.current.clear();
-    videosRef.current.forEach((v) => { v.pause(); v.srcObject = null; });
-    videosRef.current.clear();
-    if (localStreamRef.current) { localStreamRef.current.getTracks().forEach((t) => t.stop()); localStreamRef.current = null; }
-    if (screenShareRef.current) { screenShareRef.current.getTracks().forEach((t) => t.stop()); screenShareRef.current = null; }
+  // Leave voice
+  const leave = () => {
+    peers.current.forEach((pc) => pc.close());
+    peers.current.clear();
+    pendingIce.current.clear();
+    remoteAudios.current.forEach((a) => { a.pause(); a.srcObject = null; });
+    remoteAudios.current.clear();
+    if (localAudio.current) { localAudio.current.getTracks().forEach((t) => t.stop()); localAudio.current = null; }
+    if (shareStream.current) { shareStream.current.getTracks().forEach((t) => t.stop()); shareStream.current = null; }
     getSocket()?.emit('voice:leave', { channelId: activeChannel?._id });
     setIsInVoice(false);
-    setIsScreenSharing(false);
-    setVoiceUsers([]);
-    setScreenStreams(new Map());
+    setUsers([]);
+    setIsSharing(false);
+    setScreenVideo(null);
   };
 
-  const handleScreenShare = async () => {
-    if (isScreenSharing) {
-      screenShareRef.current?.getTracks().forEach((t) => t.stop());
-      screenShareRef.current = null;
-      setIsScreenSharing(false);
+  // Mute / Deafen
+  const toggleMute = () => {
+    const v = !isMuted;
+    setIsMuted(v);
+    localAudio.current?.getAudioTracks().forEach((t) => { t.enabled = !v; });
+  };
+  const toggleDeafen = () => {
+    const v = !isDeafened;
+    setIsDeafened(v);
+    remoteAudios.current.forEach((a) => { a.muted = v; });
+    if (v) localAudio.current?.getAudioTracks().forEach((t) => { t.enabled = false; });
+    else localAudio.current?.getAudioTracks().forEach((t) => { t.enabled = !isMuted; });
+  };
+
+  // Screen share
+  const toggleScreen = async () => {
+    if (isSharing) {
+      shareStream.current?.getTracks().forEach((t) => t.stop());
+      shareStream.current = null;
+      setIsSharing(false);
       getSocket()?.emit('screen:stop', { channelId: activeChannel?._id });
+      // Clean up screen PCs
+      peers.current.forEach((pc, key) => { if (key.includes(':screen')) { pc.close(); peers.current.delete(key); } });
       return;
     }
     try {
       const s = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
-      screenShareRef.current = s;
-      setIsScreenSharing(true);
+      shareStream.current = s;
+      setIsSharing(true);
       getSocket()?.emit('screen:start', { channelId: activeChannel?._id });
 
-      pcsRef.current.forEach((pc) => {
-        s.getVideoTracks().forEach((t) => {
-          const sender = pc.getSenders().find((snd) => snd.track?.kind === 'video');
-          if (sender) sender.replaceTrack(t).catch(() => {});
-          else pc.addTrack(t, s);
-        });
+      // Negotiate screen share with all connected users
+      users.forEach((u) => {
+        if (u.userId === myId.current) return;
+        setTimeout(() => negotiate(u.userId, true), 300);
       });
 
       s.getVideoTracks()[0].onended = () => {
-        setIsScreenSharing(false);
-        screenShareRef.current = null;
+        shareStream.current = null;
+        setIsSharing(false);
+        peers.current.forEach((pc, key) => { if (key.includes(':screen')) { pc.close(); peers.current.delete(key); } });
       };
     } catch {}
   };
 
+  // Socket events
   useEffect(() => {
     const socket = getSocket();
     if (!socket) return;
 
-    const onRoomUsers = (data: { users: any[] }) => {
-      data.users.forEach((u) => {
-        if (u.userId === userIdRef.current) return;
-        setVoiceUsers((prev) => {
-          if (prev.find((v) => v.userId === u.userId)) return prev;
-          setTimeout(() => callUser(u.userId), 300);
-          return [...prev, u];
-        });
+    socket.on('voice:room-users', (data: { users: any[] }) => {
+      data.users.forEach((u: any) => {
+        if (u.userId === myId.current) return;
+        setUsers((prev) => { if (prev.find((x) => x.userId === u.userId)) return prev; connectTo(u.userId); return [...prev, u]; });
       });
-    };
+    });
 
-    const onUserJoined = (data: { userId: string; username: string }) => {
-      if (data.userId === userIdRef.current) return;
-      setVoiceUsers((prev) => {
-        if (prev.find((v) => v.userId === data.userId)) return prev;
-        setTimeout(() => callUser(data.userId), 300);
-        return [...prev, data];
-      });
-    };
+    socket.on('voice:user-joined', (data: { userId: string; username: string }) => {
+      if (data.userId === myId.current) return;
+      setUsers((prev) => { if (prev.find((x) => x.userId === data.userId)) return prev; connectTo(data.userId); return [...prev, data]; });
+    });
 
-    const onUserLeft = (data: { userId: string }) => {
-      setVoiceUsers((prev) => prev.filter((v) => v.userId !== data.userId));
-      const pc = pcsRef.current.get(data.userId);
-      if (pc) { pc.close(); pcsRef.current.delete(data.userId); }
-      const audio = audiosRef.current.get(data.userId);
-      if (audio) { audio.pause(); audio.srcObject = null; audiosRef.current.delete(data.userId); }
-      setScreenStreams((prev) => { const next = new Map(prev); next.delete(data.userId); return next; });
-    };
+    socket.on('voice:user-left', (data: { userId: string }) => {
+      setUsers((prev) => prev.filter((x) => x.userId !== data.userId));
+      // Clean up audio peer
+      const pc = peers.current.get(data.userId);
+      if (pc) { pc.close(); peers.current.delete(data.userId); }
+      // Clean up screen peer
+      const spc = peers.current.get(`${data.userId}:screen`);
+      if (spc) { spc.close(); peers.current.delete(`${data.userId}:screen`); }
+      const el = remoteAudios.current.get(data.userId);
+      if (el) { el.pause(); el.srcObject = null; remoteAudios.current.delete(data.userId); }
+      setScreenVideo((prev) => prev?.userId === data.userId ? null : prev);
+    });
 
-    const screenStarted = (data: { userId: string; username: string }) => {
-      toast(`${data.username} started screen sharing`);
-    };
-
-    const screenStopped = (data: { userId: string }) => {
-      setScreenStreams((prev) => { const next = new Map(prev); next.delete(data.userId); return next; });
-    };
-
-    socket.on('voice:room-users', onRoomUsers);
-    socket.on('voice:user-joined', onUserJoined);
-    socket.on('voice:user-left', onUserLeft);
     socket.on('voice:signal', (data: any) => handleSignal(data));
-    socket.on('screen:started', screenStarted);
-    socket.on('screen:stopped', screenStopped);
+
+    socket.on('screen:started', (data: { userId: string; username: string }) => {
+      setScreenVideo({ userId: data.userId });
+    });
+
+    socket.on('screen:stopped', (data: { userId: string }) => {
+      setScreenVideo((prev) => prev?.userId === data.userId ? null : prev);
+      const spc = peers.current.get(`${data.userId}:screen`);
+      if (spc) { spc.close(); peers.current.delete(`${data.userId}:screen`); }
+    });
 
     return () => {
-      socket.off('voice:room-users', onRoomUsers);
-      socket.off('voice:user-joined', onUserJoined);
-      socket.off('voice:user-left', onUserLeft);
+      socket.off('voice:room-users');
+      socket.off('voice:user-joined');
+      socket.off('voice:user-left');
       socket.off('voice:signal');
-      socket.off('screen:started', screenStarted);
-      socket.off('screen:stopped', screenStopped);
+      socket.off('screen:started');
+      socket.off('screen:stopped');
     };
   }, []);
 
@@ -266,8 +260,8 @@ export function VoicePanel() {
           <Volume2 size={48} className="text-brand-400" />
         </div>
         <h2 className="text-2xl font-bold text-white mb-2">{activeChannel.name}</h2>
-        <p className="text-gray-400 mb-8">Click below to join the voice channel</p>
-        <button onClick={handleJoin} className="btn-primary text-lg px-8 py-3 flex items-center gap-3">
+        <p className="text-gray-400 mb-8">Click below to join</p>
+        <button onClick={join} className="btn-primary text-lg px-8 py-3 flex items-center gap-3">
           <Volume2 size={24} /> Join Voice
         </button>
       </div>
@@ -282,39 +276,40 @@ export function VoicePanel() {
       </div>
       <h2 className="text-2xl font-bold text-white mb-6">{activeChannel.name}</h2>
 
-      {/* Screen shares */}
-      {screenStreams.size > 0 && (
-        <div className="flex flex-wrap gap-4 mb-6 justify-center w-full max-w-2xl">
-          {Array.from(screenStreams.entries()).map(([uid, stream]) => (
-            <div key={uid} className="relative">
-              <video autoPlay playsInline ref={(el) => { if (el) el.srcObject = stream; }}
-                className="w-80 h-48 rounded-lg bg-black object-contain border-2 border-brand-500" />
-              <span className="absolute bottom-2 left-2 text-xs bg-black/60 px-2 py-1 rounded">
-                Screen share
-              </span>
-            </div>
-          ))}
+      {/* Screen share video from remote */}
+      {screenVideo && (
+        <div className="mb-6 w-full max-w-lg">
+          <div className="bg-black rounded-lg overflow-hidden border-2 border-brand-500">
+            <video autoPlay playsInline className="w-full h-48 object-contain"
+              ref={(el) => {
+                if (!el) return;
+                const spc = peers.current.get(`${screenVideo.userId}:screen`);
+                if (spc) {
+                  const receiver = spc.getReceivers().find((r) => r.track?.kind === 'video');
+                  if (receiver) el.srcObject = new MediaStream([receiver.track]);
+                }
+              }} />
+          </div>
+          <p className="text-xs text-gray-400 mt-1 text-center">Screen share</p>
         </div>
       )}
 
       {/* Users */}
-      <div className="flex flex-wrap items-center justify-center gap-6 mb-8">
-        {voiceUsers.map((vu) => (
-          <div key={vu.userId} className="flex flex-col items-center gap-2">
-            <div className="w-16 h-16 rounded-full bg-discord-700 flex items-center justify-center border-2 border-green-500">
-              <span className="text-white font-bold text-lg">{vu.username?.[0]?.toUpperCase()}</span>
+      <div className="flex flex-wrap gap-6 mb-8 justify-center">
+        {users.map((u) => (
+          <div key={u.userId} className="flex flex-col items-center gap-2">
+            <div className="w-16 h-16 rounded-full bg-discord-700 border-2 border-green-500 flex items-center justify-center">
+              <span className="text-white font-bold text-lg">{u.username?.[0]?.toUpperCase()}</span>
             </div>
-            <span className="text-sm text-gray-300">{vu.username}</span>
+            <span className="text-sm text-gray-300">{u.username}</span>
             <span className="text-xs text-green-400">Voice</span>
           </div>
         ))}
-        {voiceUsers.length === 0 && (
-          <p className="text-gray-400">No one else is here yet. Share the invite!</p>
-        )}
+        {users.length === 0 && <p className="text-gray-400">No one else here</p>}
       </div>
 
       {/* Controls */}
-      <div className="flex items-center gap-4">
+      <div className="flex items-center gap-3">
         <button onClick={toggleMute}
           className={`p-4 rounded-xl transition-all ${isMuted ? 'bg-red-500/20 text-red-400 hover:bg-red-500/30' : 'bg-discord-600 text-gray-300 hover:text-white hover:bg-discord-500'}`}
           title={isMuted ? 'Unmute' : 'Mute'}>
@@ -325,26 +320,18 @@ export function VoicePanel() {
           title={isDeafened ? 'Undeafen' : 'Deafen'}>
           {isDeafened ? <VolumeX size={24} /> : <Volume2 size={24} />}
         </button>
-        <button onClick={handleScreenShare}
-          className={`p-4 rounded-xl transition-all ${isScreenSharing ? 'bg-green-500/20 text-green-400 hover:bg-green-500/30' : 'bg-discord-600 text-gray-300 hover:text-white hover:bg-discord-500'}`}
-          title={isScreenSharing ? 'Stop Sharing' : 'Share Screen'}>
-          {isScreenSharing ? <MonitorOff size={24} /> : <Monitor size={24} />}
+        <button onClick={toggleScreen}
+          className={`p-4 rounded-xl transition-all ${isSharing ? 'bg-green-500/20 text-green-400 hover:bg-green-500/30' : 'bg-discord-600 text-gray-300 hover:text-white hover:bg-discord-500'}`}
+          title={isSharing ? 'Stop Sharing' : 'Share Screen'}>
+          {isSharing ? <MonitorOff size={24} /> : <Monitor size={24} />}
         </button>
-        <button onClick={handleLeave}
+        <button onClick={leave}
           className="p-4 rounded-xl bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-all"
-          title="Leave Voice Channel">
+          title="Leave">
           <PhoneOff size={24} />
         </button>
       </div>
-      {isScreenSharing && <p className="mt-3 text-sm text-green-400">Sharing your screen</p>}
+      {isSharing && <p className="mt-3 text-sm text-green-400">Sharing your screen</p>}
     </div>
   );
-}
-
-function toast(msg: string) {
-  const el = document.createElement('div');
-  el.className = 'fixed bottom-20 left-1/2 -translate-x-1/2 bg-discord-700 text-white px-4 py-2 rounded-lg shadow-lg z-50 text-sm';
-  el.textContent = msg;
-  document.body.appendChild(el);
-  setTimeout(() => el.remove(), 3000);
 }
